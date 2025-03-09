@@ -7,19 +7,6 @@ Description: Fetches and displays mailbox sizes for all cPanel accounts using WH
 import sys
 import subprocess
 import importlib
-import json
-import argparse
-import pandas as pd
-import time
-import requests
-import socket
-from tabulate import tabulate
-from urllib3.exceptions import InsecureRequestWarning
-
-# Remote WHM API Details
-REMOTE_HOST = "domain.com"
-API_TOKEN = "WHM_TOKEN"
-WHM_API_URL = f"https://{REMOTE_HOST}:2087/json-api"
 
 # Required modules list
 REQUIRED_MODULES = ["requests", "pandas", "tabulate"]
@@ -49,24 +36,37 @@ def check_and_install_modules():
                 else:
                     print("\033[1;31mInvalid input. Please enter 'y' or 'n'.\033[0m")
 
+        importlib.invalidate_caches()
         for module in missing_modules:
             importlib.import_module(module)
 
-# Run module check before anything else
+# Run module check before third-party imports
 check_and_install_modules()
 
+import json
+import argparse
+import pandas as pd
+import time
+import requests
+import socket
+from tabulate import tabulate
+from urllib3.exceptions import InsecureRequestWarning
+
+# Remote WHM API Details
+REMOTE_HOST = "domain.com"
+API_TOKEN = "WHM_TOKEN"
+WHM_API_URL = f"https://{REMOTE_HOST}:2087/json-api"
+
+# Disable insecure SSL warnings if SSL verification is off
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
 # Function to run WHM API calls remotely
-def run_whmapi(api_function, params=None, verify_ssl=True, debug=False):
+def run_whmapi(api_function, params=None, verify_ssl=True):
     headers = {
         "Authorization": f"whm root:{API_TOKEN}"
     }
-    
     url = f"{WHM_API_URL}/{api_function}"
     response = requests.get(url, headers=headers, params=params, verify=verify_ssl)
-
-    if debug:
-        print(f"\n\033[1;33m[DEBUG] API Request: {url}\033[0m")
-        print(f"\033[1;33m[DEBUG] Response: {response.text}\033[0m")
 
     if response.status_code != 200:
         print(f"\033[1;31mError: WHM API request failed ({response.status_code})\033[0m")
@@ -75,9 +75,9 @@ def run_whmapi(api_function, params=None, verify_ssl=True, debug=False):
     return response.json()
 
 # Function to get all cPanel users remotely
-def get_cpanel_users(verify_ssl=True, debug=False):
+def get_cpanel_users(verify_ssl=True):
     params = {"api.version": "1"}
-    data = run_whmapi("listaccts", params=params, verify_ssl=verify_ssl, debug=debug)
+    data = run_whmapi("listaccts", params=params, verify_ssl=verify_ssl)
 
     if not data or "data" not in data or "acct" not in data["data"]:
         print("\033[1;31mError: No cPanel users found.\033[0m")
@@ -85,8 +85,8 @@ def get_cpanel_users(verify_ssl=True, debug=False):
     
     return [user["user"] for user in data["data"]["acct"]]
 
-# Function to fetch mailboxes for a user using WHM API
-def get_mailboxes(user, verify_ssl=True, debug=False):
+# Function to fetch mailboxes for a user remotely
+def get_mailboxes(user, verify_ssl=True):
     params = {
         "api.version": "1",
         "cpanel_jsonapi_user": user,
@@ -94,7 +94,7 @@ def get_mailboxes(user, verify_ssl=True, debug=False):
         "cpanel_jsonapi_func": "list_pops_with_disk",
         "cpanel_jsonapi_apiversion": "3"
     }
-    data = run_whmapi("cpanel", params=params, verify_ssl=verify_ssl, debug=debug)
+    data = run_whmapi("cpanel", params=params, verify_ssl=verify_ssl)
 
     if not data or "result" not in data or "data" not in data["result"]:
         return []
@@ -115,11 +115,16 @@ def convert_to_human(size_bytes):
     else:
         return f"{size_bytes} B"
 
-# Function to collect all mailboxes
-def collect_mailboxes(users, hide_empty=False, verify_ssl=True, debug=False):
+# Function to collect all mailboxes with progress indicator
+def collect_mailboxes(users, hide_empty=False, verify_ssl=True):
     mailbox_data = []
-    for user in users:
-        mailboxes = get_mailboxes(user, verify_ssl, debug)
+    total_users = len(users)
+
+    for i, user in enumerate(users, start=1):
+        sys.stdout.write(f"\rProcessing users: {i}/{total_users} \033[1;32m[{'#' * (i * 20 // total_users):<20}]\033[0m")
+        sys.stdout.flush()
+
+        mailboxes = get_mailboxes(user, verify_ssl)
         if not mailboxes:
             continue
 
@@ -129,11 +134,12 @@ def collect_mailboxes(users, hide_empty=False, verify_ssl=True, debug=False):
             size_bytes = int(float(mailbox.get("_diskused", 0)))
 
             if hide_empty and size_bytes == 0:
-                continue  # Skip empty mailboxes if --hide-empty is used
+                continue
 
             size_human = convert_to_human(size_bytes)
             mailbox_data.append([user, email, domain, size_bytes, size_human])
 
+    print("\n")
     return mailbox_data
 
 # Main script execution
@@ -143,13 +149,14 @@ if __name__ == "__main__":
     parser.add_argument("-u", type=str, help="Filter results for specific cPanel users (comma-separated)")
     parser.add_argument("-o", type=str, help="Output results as a CSV file")
     parser.add_argument("--hide-empty", action="store_true", help="Hide mailboxes with zero storage")
+    parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL verification")
 
     args = parser.parse_args()
     start_time = time.time()
-    
-    verify_ssl = True  # Ensure SSL verification is handled correctly
-    users = get_cpanel_users(verify_ssl=verify_ssl)
 
+    verify_ssl = not args.no_verify_ssl
+
+    users = get_cpanel_users(verify_ssl=verify_ssl)
     if args.u:
         users = args.u.split(",")
 
@@ -165,21 +172,20 @@ if __name__ == "__main__":
     else:
         print("\n\033[1;34mMailbox Sizes for All cPanel Users (Sorted by Account and Domain)\033[0m")
 
-        account_totals = df.groupby("cPanel_User")["Size_Bytes"].sum().reset_index()
-        account_totals = account_totals.sort_values(by="Size_Bytes", ascending=False)
-
-        for _, row in account_totals.iterrows():
-            user = row["cPanel_User"]
+        accounts = df["cPanel_User"].unique()
+        for user in accounts:
             user_df = df[df["cPanel_User"] == user]
             account_total = convert_to_human(user_df["Size_Bytes"].sum())
-
             print(f"\n\033[1;33m-------- Account: {user} (Total: {account_total}) --------\033[0m")
+
             for domain in user_df["Domain"].unique():
                 domain_df = user_df[user_df["Domain"] == domain].sort_values(by="Size_Bytes", ascending=False)
                 domain_total = convert_to_human(domain_df["Size_Bytes"].sum())
-
                 print(f"\n\033[1;36m📂 Domain: {domain} (Total: {domain_total})\033[0m")
                 print(tabulate(domain_df, headers="keys", tablefmt="grid", showindex=False))
+
+                total_row = [["Total", "", "", f"{domain_df['Size_Bytes'].sum():,}", domain_total]]
+                print(tabulate(total_row, headers=["cPanel_User", "Email", "Domain", "Size_Bytes", "Size_Human"], tablefmt="grid"))
 
     print(f"\n\033[1;32mExecution Time:\033[0m {round(time.time() - start_time, 2)} seconds")
     print(f"\033[1;32mServer:\033[0m {REMOTE_HOST}")
