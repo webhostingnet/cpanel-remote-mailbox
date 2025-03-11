@@ -108,7 +108,7 @@ python3 mailbox.v8.1.remote.py --hide-empty
 - **Python 3.x**
 - **Modules:** `requests`, `pandas`, `tabulate`
 
-The script automatically installs missing dependencies.
+The script automatically installs missing dependencies. If it does't you can use run "pip3 install <module_name>" from the command line
 
 ## License
 
